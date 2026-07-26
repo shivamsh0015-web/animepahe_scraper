@@ -1,0 +1,12 @@
+{
+  "name": "animepahe-vercel-proxy",
+  "version": "1.0.0",
+  "description": "Standalone Vercel Proxy for AnimePahe & Kwik Stream Extraction",
+  "main": "api/index.js",
+  "scripts": {
+    "start": "node api/search.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.8"
+  }
+}
