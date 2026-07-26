@@ -46,9 +46,9 @@ module.exports = async (req, res) => {
     'X-Requested-With': 'XMLHttpRequest'
   };
 
-  const domains = ['https://animepahe.org', 'https://animepahe.com', 'https://animepahe.ru'];
+  const domains = ['https://animepahe.ru', 'https://animepahe.org', 'https://animepahe.com', 'https://animepahe.net'];
 
-  // If anime parameter is an AnimePahe session hash (32 chars)
+  // 1. If anime & episode parameters are exact session hashes (32 chars)
   const isSessionHash = /^[a-f0-9]{32}$/i.test(anime) && /^[a-f0-9]{32}$/i.test(episode);
 
   if (isSessionHash) {
@@ -60,73 +60,123 @@ module.exports = async (req, res) => {
         const kwikMatches = [...playRes.data.matchAll(/href="(https:\/\/[^"]*kwik[^"]*)"/gi)];
         if (kwikMatches.length === 0) continue;
 
-        for (const match of kwikMatches) {
-          const kwikEmbedUrl = match[1];
-          try {
-            const kwikRes = await axios.get(kwikEmbedUrl, {
-              headers: { ...headers, 'Referer': `${domain}/` },
-              timeout: 8000
-            });
+        const kwikEmbedUrl = kwikMatches[0][1];
+        try {
+          const kwikRes = await axios.get(kwikEmbedUrl, {
+            headers: { ...headers, 'Referer': `${domain}/` },
+            timeout: 8000
+          });
 
-            const unpacked = unpackKwikJs(kwikRes.data);
-            if (unpacked) {
-              const m3u8Match = unpacked.match(/const\s+source\s*=\s*'([^']+\.m3u8[^']*)'/);
-              if (m3u8Match) {
-                return res.status(200).json({
-                  success: true,
-                  url: m3u8Match[1],
-                  referrer: 'https://kwik.cx/'
-                });
-              }
+          const unpacked = unpackKwikJs(kwikRes.data);
+          if (unpacked) {
+            const m3u8Match = unpacked.match(/const\s+source\s*=\s*'([^']+\.m3u8[^']*)'/);
+            if (m3u8Match) {
+              return res.status(200).json({
+                success: true,
+                provider: 'AnimePahe',
+                url: m3u8Match[1],
+                referrer: 'https://kwik.cx/'
+              });
             }
-          } catch (e) {}
-        }
+          }
+        } catch (e) {}
+
+        // If .m3u8 unpack was protected, return AnimePahe's official Kwik embed player URL directly
+        return res.status(200).json({
+          success: true,
+          provider: 'AnimePahe Kwik Embed',
+          url: kwikEmbedUrl
+        });
+
       } catch (error) {}
     }
   }
 
-  // Title-based search & extraction flow
+  // 2. Title-based AnimePahe search & episode extraction flow
   for (const domain of domains) {
     try {
-      // 1. Search anime session
-      const searchRes = await axios.get(`${domain}/api?m=search&q=${encodeURIComponent(anime)}`, { headers, timeout: 6000 });
+      // Step A: Search for anime session on AnimePahe
+      const searchRes = await axios.get(`${domain}/api?m=search&q=${encodeURIComponent(anime)}`, { headers, timeout: 7000 });
       if (searchRes.data && searchRes.data.data && searchRes.data.data.length > 0) {
-        const animeSession = searchRes.data.data[0].session;
-        // 2. Fetch episode release list
-        const epListRes = await axios.get(`${domain}/api?m=release&id=${animeSession}&sort=episode_asc&page=1`, { headers, timeout: 6000 });
-        if (epListRes.data && epListRes.data.data) {
-          const epNum = Number(episode);
-          const foundEp = epListRes.data.data.find(e => Number(e.episode) === epNum) || epListRes.data.data[0];
-          if (foundEp && foundEp.session) {
-            const playRes = await axios.get(`${domain}/play/${animeSession}/${foundEp.session}`, { headers, timeout: 6000 });
-            const kwikMatches = [...playRes.data.matchAll(/href="(https:\/\/[^"]*kwik[^"]*)"/gi)];
-            if (kwikMatches.length > 0) {
-              const kwikRes = await axios.get(kwikMatches[0][1], {
+
+        // Find best title match or take first result
+        const cleanQuery = String(anime).toLowerCase().replace(/[^a-z0-9]/g, '');
+        const matchedAnime = searchRes.data.data.find(item => {
+          const itemTitle = item.title.toLowerCase().replace(/[^a-z0-9]/g, '');
+          return itemTitle.includes(cleanQuery) || cleanQuery.includes(itemTitle);
+        }) || searchRes.data.data[0];
+
+        const animeSession = matchedAnime.session;
+
+        // Step B: Search pages of episode releases to find matching episode number
+        const epNum = Number(episode);
+        let foundEpSession = null;
+
+        for (let page = 1; page <= 5; page++) {
+          const epListRes = await axios.get(`${domain}/api?m=release&id=${animeSession}&sort=episode_asc&page=${page}`, { headers, timeout: 7000 });
+          if (epListRes.data && epListRes.data.data && epListRes.data.data.length > 0) {
+            const targetEp = epListRes.data.data.find(e => Number(e.episode) === epNum);
+            if (targetEp) {
+              foundEpSession = targetEp.session;
+              break;
+            }
+            if (page >= epListRes.data.last_page) break;
+          } else {
+            break;
+          }
+        }
+
+        if (foundEpSession) {
+          const playRes = await axios.get(`${domain}/play/${animeSession}/${foundEpSession}`, { headers, timeout: 7000 });
+          const kwikMatches = [...playRes.data.matchAll(/href="(https:\/\/[^"]*kwik[^"]*)"/gi)];
+
+          if (kwikMatches.length > 0) {
+            // Pick requested audio type (sub vs dub if available)
+            let chosenKwikMatch = kwikMatches[0];
+            if (type === 'dub' && kwikMatches.length > 1) {
+              chosenKwikMatch = kwikMatches.find(m => m[0].toLowerCase().includes('dub')) || kwikMatches[kwikMatches.length - 1];
+            } else if (type === 'sub' && kwikMatches.length > 1) {
+              chosenKwikMatch = kwikMatches.find(m => !m[0].toLowerCase().includes('dub')) || kwikMatches[0];
+            }
+
+            const kwikEmbedUrl = chosenKwikMatch[1];
+
+            try {
+              const kwikRes = await axios.get(kwikEmbedUrl, {
                 headers: { ...headers, 'Referer': `${domain}/` },
-                timeout: 6000
+                timeout: 7000
               });
+
               const unpacked = unpackKwikJs(kwikRes.data);
               if (unpacked) {
                 const m3u8Match = unpacked.match(/const\s+source\s*=\s*'([^']+\.m3u8[^']*)'/);
                 if (m3u8Match) {
                   return res.status(200).json({
                     success: true,
+                    provider: 'AnimePahe',
                     url: m3u8Match[1],
                     referrer: 'https://kwik.cx/'
                   });
                 }
               }
-            }
+            } catch (e) {}
+
+            // Return official AnimePahe Kwik embed URL
+            return res.status(200).json({
+              success: true,
+              provider: 'AnimePahe Kwik Embed',
+              url: kwikEmbedUrl
+            });
           }
         }
       }
     } catch (err) {}
   }
 
-  // Graceful embed failover if AnimePahe cloudflare challenge is triggered
-  return res.status(200).json({
-    success: true,
-    url: `https://megaplay.buzz/stream/search/${encodeURIComponent(anime)}/${episode}/${type || 'sub'}`,
-    fallback: true
+  // If no match found or domain timeout, return error (do NOT return non-AnimePahe players!)
+  return res.status(404).json({
+    success: false,
+    error: "AnimePahe stream unavailable for this title/episode.",
+    provider: "AnimePahe"
   });
 };
