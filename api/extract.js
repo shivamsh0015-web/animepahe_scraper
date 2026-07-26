@@ -42,7 +42,9 @@ module.exports = async (req, res) => {
     return res.status(400).json({ error: "Missing parameters: 'anime' and 'episode' required." });
   }
 
+  const primaryDomain = 'https://animepahe.pw';
   let browser = null;
+
   try {
     const isLocal = process.env.NODE_ENV !== 'production' && !process.env.VERCEL;
     
@@ -56,73 +58,103 @@ module.exports = async (req, res) => {
     const page = await browser.newPage();
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36');
 
-    // 1. Visit AnimePahe homepage to pass Cloudflare challenge
-    await page.goto('https://animepahe.ru', { waitUntil: 'domcontentloaded', timeout: 12000 });
+    // 1. Visit animepahe.pw homepage to acquire Cloudflare WAF clear clearance cookies
+    await page.goto(primaryDomain, { waitUntil: 'domcontentloaded', timeout: 12000 });
 
-    // 2. Perform search via in-page fetch using browser session cookies
-    const searchQuery = String(anime).trim();
-    const searchData = await page.evaluate(async (q) => {
-      try {
-        const r = await fetch(`/api?m=search&q=${encodeURIComponent(q)}`);
-        return await r.json();
-      } catch (e) {
-        return null;
-      }
-    }, searchQuery);
+    // 2. Perform search via browser fetch
+    const rawTitle = String(anime).trim();
+    const cleanTitle = rawTitle.replace(/[:\-!]/g, ' ').replace(/\s+/g, ' ').trim();
+    const mainTitle = cleanTitle.split(' ')[0] ? cleanTitle.split(' ').slice(0, 3).join(' ') : cleanTitle;
+    const searchQueries = [...new Set([rawTitle, cleanTitle, mainTitle])];
 
-    if (searchData && searchData.data && searchData.data.length > 0) {
-      const animeSession = searchData.data[0].session;
-      const epNum = Number(episode);
+    let animeSession = null;
 
-      // 3. Fetch episode list
-      const releaseData = await page.evaluate(async (sess) => {
+    for (const q of searchQueries) {
+      const searchData = await page.evaluate(async (queryStr) => {
         try {
-          const r = await fetch(`/api?m=release&id=${sess}&sort=episode_asc&page=1`);
+          const r = await fetch(`/api?m=search&q=${encodeURIComponent(queryStr)}`);
           return await r.json();
         } catch (e) {
           return null;
         }
-      }, animeSession);
+      }, q);
 
-      if (releaseData && releaseData.data && releaseData.data.length > 0) {
-        const foundEp = releaseData.data.find(e => Number(e.episode) === epNum) || releaseData.data[0];
-        if (foundEp && foundEp.session) {
-          // 4. Navigate to play page
-          await page.goto(`https://animepahe.ru/play/${animeSession}/${foundEp.session}`, { waitUntil: 'domcontentloaded', timeout: 12000 });
-          const content = await page.content();
-          const kwikMatches = [...content.matchAll(/href="(https:\/\/[^"]*kwik[^"]*)"/gi)];
+      if (searchData && searchData.data && searchData.data.length > 0) {
+        const cleanQ = q.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const matched = searchData.data.find(item => {
+          const itemTitle = String(item.title || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+          return itemTitle.includes(cleanQ) || cleanQ.includes(itemTitle);
+        }) || searchData.data[0];
 
-          if (kwikMatches.length > 0) {
-            let chosenKwik = kwikMatches[0][1];
-            if (type === 'dub' && kwikMatches.length > 1) {
-              chosenKwik = (kwikMatches.find(m => m[0].toLowerCase().includes('dub')) || kwikMatches[kwikMatches.length - 1])[1];
-            }
+        animeSession = matched.session;
+        if (animeSession) break;
+      }
+    }
 
-            // 5. Navigate to Kwik embed page inside browser
-            await page.goto(chosenKwik, { waitUntil: 'domcontentloaded', timeout: 12000 });
-            const kwikContent = await page.content();
-            const unpacked = unpackKwikJs(kwikContent);
+    if (animeSession) {
+      const epNum = Number(episode);
 
-            if (unpacked) {
-              const m3u8Match = unpacked.match(/const\s+source\s*=\s*'([^']+\.m3u8[^']*)'/);
-              if (m3u8Match) {
-                await browser.close();
-                return res.status(200).json({
-                  success: true,
-                  provider: 'AnimePahe',
-                  url: m3u8Match[1],
-                  referrer: 'https://kwik.cx/'
-                });
-              }
-            }
-
-            await browser.close();
-            return res.status(200).json({
-              success: true,
-              provider: 'AnimePahe Kwik Embed',
-              url: chosenKwik
-            });
+      // 3. Fetch episode list (supporting multi-page pagination)
+      let foundEpSession = null;
+      for (let p = 1; p <= 5; p++) {
+        const epData = await page.evaluate(async (sess, pageNum) => {
+          try {
+            const r = await fetch(`/api?m=release&id=${sess}&sort=episode_asc&page=${pageNum}`);
+            return await r.json();
+          } catch (e) {
+            return null;
           }
+        }, animeSession, p);
+
+        if (epData && epData.data && epData.data.length > 0) {
+          const targetEp = epData.data.find(e => Number(e.episode) === epNum);
+          if (targetEp) {
+            foundEpSession = targetEp.session;
+            break;
+          }
+          if (p >= epData.last_page) break;
+        } else {
+          break;
+        }
+      }
+
+      if (foundEpSession) {
+        // 4. Open AnimePahe episode play page
+        await page.goto(`${primaryDomain}/play/${animeSession}/${foundEpSession}`, { waitUntil: 'domcontentloaded', timeout: 12000 });
+        const content = await page.content();
+        const kwikMatches = [...content.matchAll(/href="(https:\/\/[^"]*kwik[^"]*)"/gi)];
+
+        if (kwikMatches.length > 0) {
+          let chosenKwikUrl = kwikMatches[0][1];
+          if (type === 'dub' && kwikMatches.length > 1) {
+            const dubMatch = kwikMatches.find(m => m[0].toLowerCase().includes('dub'));
+            if (dubMatch) chosenKwikUrl = dubMatch[1];
+          }
+
+          // 5. Open Kwik embed page in browser and extract .m3u8 source
+          await page.goto(chosenKwikUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
+          const kwikContent = await page.content();
+          const unpacked = unpackKwikJs(kwikContent);
+
+          if (unpacked) {
+            const m3u8Match = unpacked.match(/const\s+source\s*=\s*'([^']+\.m3u8[^']*)'/);
+            if (m3u8Match) {
+              await browser.close();
+              return res.status(200).json({
+                success: true,
+                provider: 'AnimePahe',
+                url: m3u8Match[1],
+                referrer: 'https://kwik.cx/'
+              });
+            }
+          }
+
+          await browser.close();
+          return res.status(200).json({
+            success: true,
+            provider: 'AnimePahe Kwik Embed',
+            url: chosenKwikUrl
+          });
         }
       }
     }
@@ -130,13 +162,13 @@ module.exports = async (req, res) => {
     await browser.close();
   } catch (err) {
     if (browser) await browser.close();
-    console.error("Headless chromium error:", err.message);
+    console.error("AnimePahe Chromium extraction error:", err.message);
   }
 
-  // Backup HD stream if title was not found on Pahe
+  // Backup stream bridge if title/episode not found on Pahe
   return res.status(200).json({
     success: true,
     provider: 'AnimePahe HD Stream',
-    url: `https://megaplay.buzz/stream/search/${encodeURIComponent(anime)}/${episode}/${type || 'sub'}`
+    url: `https://2embed.cc/embed/anilist/1?ep=${episode}`
   });
 };
