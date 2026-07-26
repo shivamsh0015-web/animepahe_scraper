@@ -17,20 +17,27 @@ module.exports = async (req, res) => {
   }
 
   const headers = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     'Accept': 'application/json, text/javascript, */*; q=0.01',
     'X-Requested-With': 'XMLHttpRequest',
-    'Referer': 'https://animepahe.ru/'
+    'Referer': 'https://animepahe.org/'
   };
 
-  try {
-    const releaseUrl = `https://animepahe.ru/api?m=release&id=${id}&sort=episode_asc&page=${page}`;
-    const response = await axios.get(releaseUrl, { headers, timeout: 8000 });
-    return res.status(200).json(response.data);
-  } catch (error) {
-    return res.status(500).json({
-      error: "Failed to fetch episode list",
-      message: error.message
-    });
+  const domains = ['https://animepahe.org', 'https://animepahe.com'];
+
+  for (const domain of domains) {
+    try {
+      const releaseUrl = `${domain}/api?m=release&id=${id}&sort=episode_asc&page=${page}`;
+      const response = await axios.get(releaseUrl, { headers, timeout: 8000 });
+      if (response.status === 200 && response.data) {
+        return res.status(200).json(response.data);
+      }
+    } catch (e) {
+      // try next domain
+    }
   }
+
+  return res.status(500).json({
+    error: "Failed to fetch episode list"
+  });
 };

@@ -1,6 +1,5 @@
 const axios = require('axios');
 
-// Kwik Dean Edwards packed JS decoder
 function unpackKwikJs(packedStr) {
   try {
     const match = packedStr.match(/eval\(function\(p,a,c,k,e,d\)\{.*\}\('([^']*)',(\d+),(\d+),'([^']*)'\.split\('\|'\)/);
@@ -42,68 +41,61 @@ module.exports = async (req, res) => {
   }
 
   const headers = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
   };
 
-  try {
-    // 1. Fetch play page HTML
-    const playUrl = `https://animepahe.ru/play/${anime}/${episode}`;
-    const playRes = await axios.get(playUrl, { headers, timeout: 10000 });
+  const domains = ['https://animepahe.org', 'https://animepahe.com'];
 
-    // 2. Extract Kwik embed URLs
-    const kwikMatches = [...playRes.data.matchAll(/href="(https:\/\/[^"]*kwik[^"]*)"/gi)];
-    if (kwikMatches.length === 0) {
-      return res.status(404).json({ error: "No Kwik video streams found on play page." });
-    }
+  for (const domain of domains) {
+    try {
+      const playUrl = `${domain}/play/${anime}/${episode}`;
+      const playRes = await axios.get(playUrl, { headers, timeout: 10000 });
 
-    const sources = [];
+      const kwikMatches = [...playRes.data.matchAll(/href="(https:\/\/[^"]*kwik[^"]*)"/gi)];
+      if (kwikMatches.length === 0) continue;
 
-    // 3. Extract stream for each resolution link
-    for (const match of kwikMatches) {
-      const kwikEmbedUrl = match[1];
-      try {
-        const kwikRes = await axios.get(kwikEmbedUrl, {
-          headers: {
-            ...headers,
-            'Referer': 'https://animepahe.ru/'
-          },
-          timeout: 8000
-        });
+      const sources = [];
 
-        const unpacked = unpackKwikJs(kwikRes.data);
-        if (unpacked) {
-          const m3u8Match = unpacked.match(/const\s+source\s*=\s*'([^']+\.m3u8[^']*)'/);
-          if (m3u8Match) {
-            sources.push({
-              url: m3u8Match[1],
-              isM3U8: true,
-              headers: {
-                Referer: 'https://kwik.cx/'
-              }
-            });
+      for (const match of kwikMatches) {
+        const kwikEmbedUrl = match[1];
+        try {
+          const kwikRes = await axios.get(kwikEmbedUrl, {
+            headers: {
+              ...headers,
+              'Referer': `${domain}/`
+            },
+            timeout: 8000
+          });
+
+          const unpacked = unpackKwikJs(kwikRes.data);
+          if (unpacked) {
+            const m3u8Match = unpacked.match(/const\s+source\s*=\s*'([^']+\.m3u8[^']*)'/);
+            if (m3u8Match) {
+              sources.push({
+                url: m3u8Match[1],
+                isM3U8: true,
+                headers: {
+                  Referer: 'https://kwik.cx/'
+                }
+              });
+            }
           }
-        }
-      } catch (e) {
-        // Continue checking other stream qualities
+        } catch (e) {}
       }
-    }
 
-    if (sources.length === 0) {
-      return res.status(500).json({ error: "Could not decode M3U8 video streams from Kwik." });
-    }
-
-    return res.status(200).json({
-      status: "success",
-      animeSession: anime,
-      episodeSession: episode,
-      sources: sources
-    });
-
-  } catch (error) {
-    return res.status(500).json({
-      error: "Failed to extract AnimePahe video stream",
-      message: error.message
-    });
+      if (sources.length > 0) {
+        return res.status(200).json({
+          status: "success",
+          animeSession: anime,
+          episodeSession: episode,
+          sources: sources
+        });
+      }
+    } catch (error) {}
   }
+
+  return res.status(500).json({
+    error: "Failed to extract AnimePahe video stream across active domains."
+  });
 };

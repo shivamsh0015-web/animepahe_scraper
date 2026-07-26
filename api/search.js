@@ -14,33 +14,29 @@ module.exports = async (req, res) => {
     return res.status(400).json({ error: "Missing query parameter 'q'" });
   }
 
-  const userAgents = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
-  ];
-
   const headers = {
-    'User-Agent': userAgents[Math.floor(Math.random() * userAgents.length)],
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     'Accept': 'application/json, text/javascript, */*; q=0.01',
     'X-Requested-With': 'XMLHttpRequest',
-    'Referer': 'https://animepahe.ru/'
+    'Referer': 'https://animepahe.org/'
   };
 
-  try {
-    const searchUrl = `https://animepahe.ru/api?m=search&q=${encodeURIComponent(query)}`;
-    const response = await axios.get(searchUrl, { headers, timeout: 8000 });
-    return res.status(200).json(response.data);
-  } catch (error) {
-    // Fallback mirror if main fails
+  const domains = ['https://animepahe.org', 'https://animepahe.com'];
+
+  for (const domain of domains) {
     try {
-      const fallbackUrl = `https://animepahe.org/api?m=search&q=${encodeURIComponent(query)}`;
-      const fallbackRes = await axios.get(fallbackUrl, { headers, timeout: 8000 });
-      return res.status(200).json(fallbackRes.data);
+      const searchUrl = `${domain}/api?m=search&q=${encodeURIComponent(query)}`;
+      const response = await axios.get(searchUrl, { headers, timeout: 8000 });
+      if (response.status === 200 && response.data) {
+        return res.status(200).json(response.data);
+      }
     } catch (e) {
-      return res.status(500).json({
-        error: "Failed to search AnimePahe",
-        message: error.message
-      });
+      // try next domain
     }
   }
+
+  return res.status(500).json({
+    error: "Failed to search AnimePahe across active domains",
+    message: "AnimePahe domains (org/com) require active session headers or are under maintenance."
+  });
 };
