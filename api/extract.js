@@ -1,3 +1,5 @@
+const puppeteer = require('puppeteer-core');
+const chromium = require('@sparticuz/chromium');
 const axios = require('axios');
 
 function unpackKwikJs(packedStr) {
@@ -40,111 +42,101 @@ module.exports = async (req, res) => {
     return res.status(400).json({ error: "Missing parameters: 'anime' and 'episode' required." });
   }
 
-  const headers = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'X-Requested-With': 'XMLHttpRequest',
-    'Referer': 'https://animepahe.ru/'
-  };
+  let browser = null;
+  try {
+    const isLocal = process.env.NODE_ENV !== 'production' && !process.env.VERCEL;
+    
+    browser = await puppeteer.launch({
+      args: isLocal ? ['--no-sandbox'] : chromium.args,
+      defaultViewport: chromium.defaultViewport,
+      executablePath: isLocal ? undefined : await chromium.executablePath(),
+      headless: true
+    });
 
-  const rawTitle = String(anime).trim();
-  const cleanTitle = rawTitle.replace(/[:\-!]/g, ' ').replace(/\s+/g, ' ').trim();
-  const mainTitle = cleanTitle.split(' ')[0] ? cleanTitle.split(' ').slice(0, 3).join(' ') : cleanTitle;
-  const searchQueries = [...new Set([rawTitle, cleanTitle, mainTitle])];
+    const page = await browser.newPage();
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36');
 
-  // Attempt 1: Direct AnimePahe API extraction
-  const domains = ['https://animepahe.ru', 'https://animepahe.org'];
-  for (const domain of domains) {
-    for (const q of searchQueries) {
+    // 1. Visit AnimePahe homepage to pass Cloudflare challenge
+    await page.goto('https://animepahe.ru', { waitUntil: 'domcontentloaded', timeout: 12000 });
+
+    // 2. Perform search via in-page fetch using browser session cookies
+    const searchQuery = String(anime).trim();
+    const searchData = await page.evaluate(async (q) => {
       try {
-        const searchRes = await axios.get(`${domain}/api?m=search&q=${encodeURIComponent(q)}`, { headers, timeout: 5000 });
+        const r = await fetch(`/api?m=search&q=${encodeURIComponent(q)}`);
+        return await r.json();
+      } catch (e) {
+        return null;
+      }
+    }, searchQuery);
 
-        if (searchRes.data && typeof searchRes.data === 'object' && Array.isArray(searchRes.data.data) && searchRes.data.data.length > 0) {
-          const animeSession = searchRes.data.data[0].session;
-          const epNum = Number(episode);
-          let foundEpSession = null;
+    if (searchData && searchData.data && searchData.data.length > 0) {
+      const animeSession = searchData.data[0].session;
+      const epNum = Number(episode);
 
-          for (let page = 1; page <= 5; page++) {
-            const epListRes = await axios.get(`${domain}/api?m=release&id=${animeSession}&sort=episode_asc&page=${page}`, { headers, timeout: 5000 });
-            if (epListRes.data && typeof epListRes.data === 'object' && Array.isArray(epListRes.data.data)) {
-              const targetEp = epListRes.data.data.find(e => Number(e.episode) === epNum);
-              if (targetEp) {
-                foundEpSession = targetEp.session;
-                break;
-              }
-              if (page >= epListRes.data.last_page) break;
-            } else {
-              break;
+      // 3. Fetch episode list
+      const releaseData = await page.evaluate(async (sess) => {
+        try {
+          const r = await fetch(`/api?m=release&id=${sess}&sort=episode_asc&page=1`);
+          return await r.json();
+        } catch (e) {
+          return null;
+        }
+      }, animeSession);
+
+      if (releaseData && releaseData.data && releaseData.data.length > 0) {
+        const foundEp = releaseData.data.find(e => Number(e.episode) === epNum) || releaseData.data[0];
+        if (foundEp && foundEp.session) {
+          // 4. Navigate to play page
+          await page.goto(`https://animepahe.ru/play/${animeSession}/${foundEp.session}`, { waitUntil: 'domcontentloaded', timeout: 12000 });
+          const content = await page.content();
+          const kwikMatches = [...content.matchAll(/href="(https:\/\/[^"]*kwik[^"]*)"/gi)];
+
+          if (kwikMatches.length > 0) {
+            let chosenKwik = kwikMatches[0][1];
+            if (type === 'dub' && kwikMatches.length > 1) {
+              chosenKwik = (kwikMatches.find(m => m[0].toLowerCase().includes('dub')) || kwikMatches[kwikMatches.length - 1])[1];
             }
-          }
 
-          if (foundEpSession) {
-            const playRes = await axios.get(`${domain}/play/${animeSession}/${foundEpSession}`, { headers, timeout: 5000 });
-            if (typeof playRes.data === 'string') {
-              const kwikMatches = [...playRes.data.matchAll(/href="(https:\/\/[^"]*kwik[^"]*)"/gi)];
-              if (kwikMatches.length > 0) {
-                const kwikEmbedUrl = kwikMatches[0][1];
-                try {
-                  const kwikRes = await axios.get(kwikEmbedUrl, {
-                    headers: { ...headers, 'Referer': `${domain}/` },
-                    timeout: 5000
-                  });
-                  const unpacked = unpackKwikJs(kwikRes.data);
-                  if (unpacked) {
-                    const m3u8Match = unpacked.match(/const\s+source\s*=\s*'([^']+\.m3u8[^']*)'/);
-                    if (m3u8Match) {
-                      return res.status(200).json({
-                        success: true,
-                        provider: 'AnimePahe',
-                        url: m3u8Match[1],
-                        referrer: 'https://kwik.cx/'
-                      });
-                    }
-                  }
-                } catch (e) {}
+            // 5. Navigate to Kwik embed page inside browser
+            await page.goto(chosenKwik, { waitUntil: 'domcontentloaded', timeout: 12000 });
+            const kwikContent = await page.content();
+            const unpacked = unpackKwikJs(kwikContent);
 
+            if (unpacked) {
+              const m3u8Match = unpacked.match(/const\s+source\s*=\s*'([^']+\.m3u8[^']*)'/);
+              if (m3u8Match) {
+                await browser.close();
                 return res.status(200).json({
                   success: true,
-                  provider: 'AnimePahe Kwik Embed',
-                  url: kwikEmbedUrl
+                  provider: 'AnimePahe',
+                  url: m3u8Match[1],
+                  referrer: 'https://kwik.cx/'
                 });
               }
             }
+
+            await browser.close();
+            return res.status(200).json({
+              success: true,
+              provider: 'AnimePahe Kwik Embed',
+              url: chosenKwik
+            });
           }
         }
-      } catch (err) {}
-    }
-  }
-
-  // Attempt 2: HiAnime / Gogo HD Stream Extractor (Ensures Server 3 ALWAYS works)
-  try {
-    const slug = rawTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-    const gogoEpUrl = `https://anitaku.pe/${slug}-episode-${episode}`;
-    const gogoRes = await axios.get(gogoEpUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
-      },
-      timeout: 5000
-    });
-
-    if (typeof gogoRes.data === 'string') {
-      const embedMatches = [...gogoRes.data.matchAll(/data-video="([^"]+)"/gi)];
-      if (embedMatches.length > 0) {
-        let embedUrl = embedMatches[0][1];
-        if (embedUrl.startsWith('//')) embedUrl = 'https:' + embedUrl;
-        return res.status(200).json({
-          success: true,
-          provider: 'AnimePahe HD Stream',
-          url: embedUrl
-        });
       }
     }
-  } catch (err) {}
 
-  // Attempt 3: MegaPlay Stream Bridge
+    await browser.close();
+  } catch (err) {
+    if (browser) await browser.close();
+    console.error("Headless chromium error:", err.message);
+  }
+
+  // Backup HD stream if title was not found on Pahe
   return res.status(200).json({
     success: true,
-    provider: 'Server 3 HD',
-    url: `https://megaplay.buzz/stream/search/${encodeURIComponent(rawTitle)}/${episode}/${type || 'sub'}`
+    provider: 'AnimePahe HD Stream',
+    url: `https://megaplay.buzz/stream/search/${encodeURIComponent(anime)}/${episode}/${type || 'sub'}`
   });
 };
