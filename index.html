@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>AnimePahe Stream Proxy API</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #0f172a; color: #f8fafc; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; }
+    .card { background: #1e293b; padding: 30px; border-radius: 16px; border: 1px solid rgba(255,255,255,0.1); max-width: 500px; width: 100%; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+    h1 { color: #2dd4bf; margin-top: 0; font-size: 1.5rem; }
+    code { background: #090d16; padding: 3px 8px; border-radius: 6px; color: #a78bfa; font-size: 0.9rem; }
+    .endpoint { margin: 12px 0; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>⚡ AnimePahe Proxy API Live</h1>
+    <p style="color: #94a3b8;">Serverless API operational with CORS enabled.</p>
+    <hr style="border-color: rgba(255,255,255,0.08); margin: 20px 0;">
+    <div class="endpoint">Search: <code>/api/search?q=solo+leveling</code></div>
+    <div class="endpoint">Episodes: <code>/api/episodes?id={sessionId}</code></div>
+    <div class="endpoint">Extract Stream: <code>/api/extract?anime={aId}&episode={eId}</code></div>
+  </div>
+</body>
+</html>
