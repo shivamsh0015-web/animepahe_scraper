@@ -1,6 +1,5 @@
 const puppeteer = require('puppeteer-core');
 const chromium = require('@sparticuz/chromium');
-const axios = require('axios');
 
 function unpackKwikJs(packedStr) {
   try {
@@ -36,10 +35,10 @@ module.exports = async (req, res) => {
     return res.status(200).end();
   }
 
-  const { anime, episode, type } = req.query;
+  const { anime, romaji, episode, type } = req.query;
 
-  if (!anime || !episode) {
-    return res.status(400).json({ error: "Missing parameters: 'anime' and 'episode' required." });
+  if ((!anime && !romaji) || !episode) {
+    return res.status(400).json({ error: "Missing parameters: 'anime' or 'romaji' and 'episode' required." });
   }
 
   const primaryDomain = 'https://animepahe.pw';
@@ -47,7 +46,7 @@ module.exports = async (req, res) => {
 
   try {
     const isLocal = process.env.NODE_ENV !== 'production' && !process.env.VERCEL;
-    
+
     browser = await puppeteer.launch({
       args: isLocal ? ['--no-sandbox'] : chromium.args,
       defaultViewport: chromium.defaultViewport,
@@ -58,14 +57,18 @@ module.exports = async (req, res) => {
     const page = await browser.newPage();
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36');
 
-    // 1. Visit animepahe.pw homepage to acquire Cloudflare WAF clear clearance cookies
+    // 1. Visit animepahe.pw homepage to pass Cloudflare challenge
     await page.goto(primaryDomain, { waitUntil: 'domcontentloaded', timeout: 12000 });
 
-    // 2. Perform search via browser fetch
-    const rawTitle = String(anime).trim();
-    const cleanTitle = rawTitle.replace(/[:\-!]/g, ' ').replace(/\s+/g, ' ').trim();
-    const mainTitle = cleanTitle.split(' ')[0] ? cleanTitle.split(' ').slice(0, 3).join(' ') : cleanTitle;
-    const searchQueries = [...new Set([rawTitle, cleanTitle, mainTitle])];
+    // 2. Build multi-title search candidates (Romaji title, English title, clean words)
+    const candidates = [];
+    if (romaji) candidates.push(String(romaji).trim());
+    if (anime) candidates.push(String(anime).trim());
+
+    const cleanedCandidates = candidates.map(t => t.replace(/[:\-!]/g, ' ').replace(/\s+/g, ' ').trim());
+    const shortCandidates = cleanedCandidates.map(t => t.split(' ').slice(0, 2).join(' '));
+
+    const searchQueries = [...new Set([...candidates, ...cleanedCandidates, ...shortCandidates])].filter(Boolean);
 
     let animeSession = null;
 
@@ -93,9 +96,8 @@ module.exports = async (req, res) => {
 
     if (animeSession) {
       const epNum = Number(episode);
-
-      // 3. Fetch episode list (supporting multi-page pagination)
       let foundEpSession = null;
+
       for (let p = 1; p <= 5; p++) {
         const epData = await page.evaluate(async (sess, pageNum) => {
           try {
@@ -119,7 +121,6 @@ module.exports = async (req, res) => {
       }
 
       if (foundEpSession) {
-        // 4. Open AnimePahe episode play page
         await page.goto(`${primaryDomain}/play/${animeSession}/${foundEpSession}`, { waitUntil: 'domcontentloaded', timeout: 12000 });
         const content = await page.content();
         const kwikMatches = [...content.matchAll(/href="(https:\/\/[^"]*kwik[^"]*)"/gi)];
@@ -131,7 +132,6 @@ module.exports = async (req, res) => {
             if (dubMatch) chosenKwikUrl = dubMatch[1];
           }
 
-          // 5. Open Kwik embed page in browser and extract .m3u8 source
           await page.goto(chosenKwikUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
           const kwikContent = await page.content();
           const unpacked = unpackKwikJs(kwikContent);
@@ -165,10 +165,10 @@ module.exports = async (req, res) => {
     console.error("AnimePahe Chromium extraction error:", err.message);
   }
 
-  // Backup stream bridge if title/episode not found on Pahe
+  // Pure AnimePahe response when title is unavailable on Pahe
   return res.status(200).json({
-    success: true,
-    provider: 'AnimePahe HD Stream',
-    url: `https://2embed.cc/embed/anilist/1?ep=${episode}`
+    success: false,
+    error: "This title is not currently available on AnimePahe servers. Please try Server 1 or Server 2.",
+    provider: "AnimePahe"
   });
 };
