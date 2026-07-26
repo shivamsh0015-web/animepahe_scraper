@@ -40,7 +40,14 @@ module.exports = async (req, res) => {
     return res.status(400).json({ error: "Missing parameters: 'anime' or 'romaji' and 'episode' required." });
   }
 
-  const domains = ['https://animepahe.pw', 'https://animepahe.org', 'https://animepahe.ru'];
+  // Complete rotation of official AnimePahe domains
+  const paheDomains = [
+    'https://animepahe.pw',
+    'https://animepahe.org',
+    'https://animepahe.ru',
+    'https://pahe.win',
+    'https://animepahe.com'
+  ];
 
   const headers = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
@@ -49,14 +56,14 @@ module.exports = async (req, res) => {
     'Cookie': '__ddg1_=; __ddg2_=;'
   };
 
-  // Build candidate titles
+  // Build candidate search queries
   const rawCandidates = [romaji, anime].filter(Boolean).map(t => String(t).trim());
   const cleanCandidates = rawCandidates.map(t => t.replace(/[:\-!]/g, ' ').replace(/\s+/g, ' ').trim());
   const shortCandidates = cleanCandidates.map(t => t.split(' ').slice(0, 2).join(' '));
 
   const queries = [...new Set([...rawCandidates, ...cleanCandidates, ...shortCandidates])].filter(Boolean);
 
-  for (const domain of domains) {
+  for (const domain of paheDomains) {
     for (const q of queries) {
       try {
         const searchRes = await axios.get(`${domain}/api?m=search&q=${encodeURIComponent(q)}`, {
@@ -138,7 +145,7 @@ module.exports = async (req, res) => {
 
   return res.status(200).json({
     success: false,
-    error: "This title is not currently available on AnimePahe servers. Please try Server 1 or Server 2.",
+    error: "Server 3 strictly uses AnimePahe streams. AnimePahe servers are currently unreachable or processing Cloudflare maintenance. Please try Server 1 or Server 2.",
     provider: "AnimePahe"
   });
 };
